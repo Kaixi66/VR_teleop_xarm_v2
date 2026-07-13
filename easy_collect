@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+
+# UF850 VR collection launcher.
+# Put machine/task-specific values in user_settings.env. That file is ignored
+# by Git so the hotspot password is never published.
+
+set -uo pipefail
+
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# ======================== USER SETTINGS ========================
+
+# Folder name created below vr_teleop_collection/data/.
+# Use ASCII letters, numbers, dots, underscores, or hyphens only.
+DATASET_NAME="example_task"
+
+# One text field is used for task / instruction / prompt.
+# English is recommended for the training instruction.
+TASK_TEXT="Describe the task in one English sentence."
+
+# Use "real" for the robot and cameras, or "mock" for a safe test.
+MODE="real"
+
+# Automatically create/activate the Quest Wi-Fi hotspot in real mode.
+# Leave HOTSPOT_PASSWORD empty to enter it without echo when needed.
+USE_HOTSPOT="true"
+HOTSPOT_PASSWORD=""
+
+# ====================== END USER SETTINGS ======================
+# Copy user_settings.env.example to user_settings.env, then edit that local
+# file instead of changing this public launcher.
+
+USER_SETTINGS_FILE="${VR_USER_SETTINGS_FILE:-${PROJECT_DIR}/user_settings.env}"
+if [[ -f ${USER_SETTINGS_FILE} ]]; then
+    # shellcheck source=/dev/null
+    source "${USER_SETTINGS_FILE}"
+fi
+if [[ -n ${VR_HOTSPOT_PASSWORD:-} ]]; then
+    HOTSPOT_PASSWORD=${VR_HOTSPOT_PASSWORD}
+fi
+
+# Normally, nothing below this line needs to be changed.
+
+VRCTL="${PROJECT_DIR}/vrctl"
+prepare_pid=""
+
+stop_prepare_child() {
+    local signal_name=$1
+    if [[ -n ${prepare_pid} ]]; then
+        kill -s "${signal_name}" -- "${prepare_pid}" 2>/dev/null || true
+        wait "${prepare_pid}" 2>/dev/null || true
+        prepare_pid=""
+    fi
+}
+
+on_interrupt() {
+    stop_prepare_child INT
+    printf '\nCancelled before collection started.\n' >&2
+    exit 130
+}
+
+on_terminate() {
+    local signal_name=$1
+    local exit_code=$2
+    stop_prepare_child "${signal_name}"
+    printf '\nLauncher stopped before collection started.\n' >&2
+    exit "${exit_code}"
+}
+
+trap on_interrupt INT
+trap 'on_terminate TERM 143' TERM
+trap 'on_terminate HUP 129' HUP
+
+if [[ ! -x ${VRCTL} ]]; then
+    printf 'ERROR: executable entry point not found: %s\n' "${VRCTL}" >&2
+    exit 2
+fi
+
+if [[ ! ${DATASET_NAME} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    printf 'ERROR: invalid DATASET_NAME %q. Example: put_object_in_cup\n' "${DATASET_NAME}" >&2
+    exit 2
+fi
+
+if [[ ! ${TASK_TEXT} =~ [^[:space:]] ]]; then
+    printf 'ERROR: TASK_TEXT cannot be empty. Edit the USER SETTINGS block first.\n' >&2
+    exit 2
+fi
+
+mode=${MODE,,}
+case ${mode} in
+    real|mock) ;;
+    *)
+        printf 'ERROR: MODE must be "real" or "mock", not %q.\n' "${MODE}" >&2
+        exit 2
+        ;;
+esac
+
+use_hotspot=${USE_HOTSPOT,,}
+case ${use_hotspot} in
+    true|false) ;;
+    *)
+        printf 'ERROR: USE_HOTSPOT must be "true" or "false", not %q.\n' "${USE_HOTSPOT}" >&2
+        exit 2
+        ;;
+esac
+
+if [[ ${use_hotspot} == true ]]; then
+    if [[ -n ${HOTSPOT_PASSWORD} ]] && (( ${#HOTSPOT_PASSWORD} < 8 )); then
+        printf 'ERROR: HOTSPOT_PASSWORD must contain at least 8 characters.\n' >&2
+        exit 2
+    fi
+    if [[ -n ${HOTSPOT_PASSWORD} ]]; then
+        export VR_HOTSPOT_PASSWORD="${HOTSPOT_PASSWORD}"
+    fi
+fi
+
+output_path="${PROJECT_DIR}/data/${DATASET_NAME}"
+linear_speed=$(awk -F '=' '
+    /^[[:space:]]*linear_speed_mm_s[[:space:]]*=/ {
+        value = $2
+        gsub(/[[:space:]]/, "", value)
+        print value
+        exit
+    }
+' "${PROJECT_DIR}/config.toml")
+hotspot_ssid=$(awk '
+    /^\[hotspot\][[:space:]]*$/ {
+        in_hotspot = 1
+        next
+    }
+    /^\[/ {
+        in_hotspot = 0
+    }
+    in_hotspot && /^[[:space:]]*ssid[[:space:]]*=/ {
+        value = substr($0, index($0, "=") + 1)
+        sub(/[[:space:]]*#.*/, "", value)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        sub(/^"/, "", value)
+        sub(/"$/, "", value)
+        print value
+        exit
+    }
+' "${PROJECT_DIR}/config.toml")
+hotspot_ssid=${hotspot_ssid:-configured-hotspot}
+
+printf 'UF850 VR collection settings\n'
+printf '============================\n'
+printf 'Mode:       %s\n' "${mode}"
+printf 'Dataset:    %s\n' "${DATASET_NAME}"
+printf 'Task text:  %s\n' "${TASK_TEXT}"
+printf 'Output:     %s\n' "${output_path}"
+if [[ ${mode} == real ]]; then
+    printf 'Robot speed: %s mm/s (use 50.0 for the first live test)\n' "${linear_speed:-unknown}"
+    printf 'Quest hotspot: %s\n' "${use_hotspot}"
+    if [[ ${use_hotspot} == true ]]; then
+        if [[ -n ${VR_HOTSPOT_PASSWORD:-} ]]; then
+            printf 'Quest Wi-Fi: %s (password loaded from local settings/environment)\n' "${hotspot_ssid}"
+        else
+            printf 'Quest Wi-Fi: %s (password will be requested securely if needed)\n' "${hotspot_ssid}"
+        fi
+    fi
+fi
+printf '\n'
+
+collection_args=(
+    "--dataset=${DATASET_NAME}"
+    "--task=${TASK_TEXT}"
+)
+
+cd -- "${PROJECT_DIR}" || exit 2
+
+if [[ ${mode} == mock ]]; then
+    printf 'Starting mock collection. Press Ctrl+C to save the episode.\n\n'
+    trap - INT TERM HUP
+    exec ./vrctl collect "${collection_args[@]}" --mock
+fi
+
+printf 'Running the read-only device preflight.\n\n'
+if ! ./vrctl doctor; then
+    printf '\nPreflight failed. No robot or collection process was started.\n' >&2
+    exit 1
+fi
+
+stack_output=$(./vrctl status 2>&1)
+stack_status_code=$?
+stack_running=false
+if (( stack_status_code == 0 )); then
+    stack_running=true
+elif [[ ${stack_output} == *RUNNING* ]]; then
+    printf '\nERROR: only part of the ROS/bridge stack is running.\n' >&2
+    printf '%s\n' "${stack_output}" >&2
+    printf "Run './vrctl stop', inspect the robot error, then try again.\n" >&2
+    exit 1
+fi
+
+if [[ ${stack_running} == false ]]; then
+    prepare_args=("prepare")
+    if [[ ${use_hotspot} == true ]]; then
+        prepare_args+=("--hotspot")
+        printf '\nThe Quest hotspot will now be enabled.\n'
+    else
+        printf '\nThe Quest must already share a network with this computer.\n'
+    fi
+
+    printf '%s\n\n' 'This network setup does not start or move the robot.'
+    ./vrctl "${prepare_args[@]}" <&0 &
+    prepare_pid=$!
+    wait "${prepare_pid}"
+    prepare_status=$?
+    prepare_pid=""
+    if (( prepare_status != 0 )); then
+        printf '\nQuest preparation failed. The robot and collector were not started.\n' >&2
+        exit "${prepare_status}"
+    fi
+
+    printf '\n%s\n' 'Quest network is ready. Connect Quest to the shown Wi-Fi, but keep the VR teleoperation app CLOSED.'
+else
+    printf '\n%s\n' 'The existing ROS/bridge session is healthy and will be reused.'
+    printf '%s\n' 'Keep the Quest connected. The VR app may remain open between episodes.'
+fi
+
+printf '%s\n' 'Keep the controllers still while the new episode starts.'
+printf '%s\n' 'Check that the emergency stop is reachable and the workspace is clear.'
+printf 'Type uppercase START to begin real collection: '
+if ! IFS= read -r confirmation; then
+    printf '\nInput ended. Real collection was not started.\n' >&2
+    exit 130
+fi
+if [[ ${confirmation} != START ]]; then
+    printf 'Cancelled. Real collection was not started.\n'
+    exit 0
+fi
+
+if [[ ${stack_running} == false ]]; then
+    printf '\nStarting the robot driver and the PAUSED VR bridge.\n'
+    start_args=("start")
+    if [[ ${use_hotspot} == true ]]; then
+        start_args+=("--hotspot")
+    fi
+    if ! ./vrctl "${start_args[@]}"; then
+        printf '\nControl stack startup failed; collection was not started.\n' >&2
+        exit 1
+    fi
+fi
+
+printf '\nInitializing the robot state reader and both cameras.\n'
+printf 'When you see COLLECTOR READY, open/keep open the Quest App and hold both controllers still.\n'
+printf 'Move only after you see: TELEOP ARMED\n'
+printf 'Press Ctrl+C when the episode is complete. The episode will save and VR control will pause.\n\n'
+trap - INT TERM HUP
+exec ./vrctl collect "${collection_args[@]}"

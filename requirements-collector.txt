@@ -1,0 +1,7 @@
+# Install in the Python environment referenced by paths.collector_python.
+# pyrealsense2 may need to be installed from your platform's librealsense
+# packages instead of PyPI.
+numpy>=2.0
+opencv-python>=4.8
+pyrealsense2
+xarm-python-sdk>=1.17

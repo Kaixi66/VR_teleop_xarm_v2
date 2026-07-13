@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${RESET_PYTHON:-${HOME}/robot_env/bin/python}"
+VRCTL="${ROOT}/vrctl"
+RUNTIME_DIR="${ROOT}/.runtime"
+
+if [[ ! -x "${PYTHON}" ]]; then
+    printf 'ERROR: reset Python environment not found: %s\n' "${PYTHON}" >&2
+    exit 2
+fi
+
+if [[ ! -x "${VRCTL}" ]]; then
+    printf 'ERROR: vrctl entry point not found: %s\n' "${VRCTL}" >&2
+    exit 2
+fi
+
+# Do not let a reset race an active or starting collector. The manager holds
+# this same lock for the complete collector lifetime, including final flush.
+mkdir -p -- "${RUNTIME_DIR}"
+exec 9>"${RUNTIME_DIR}/collector.lock"
+if ! flock -n 9; then
+    printf 'ERROR: an episode is still recording or saving. Wait for easy_collect to finish, then run reset_arm again.\n' >&2
+    exit 1
+fi
+
+stack_output=""
+stack_running=false
+if stack_output=$("${VRCTL}" status 2>&1); then
+    stack_running=true
+elif [[ ${stack_output} == *RUNNING* ]]; then
+    # A partially failed stack still owns robot resources and must be cleaned.
+    stack_running=true
+fi
+
+if [[ ${stack_running} == true ]]; then
+    printf 'Paused VR/ROS stack detected; stopping it safely before reset.\n'
+    "${VRCTL}" stop
+fi
+
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+exec "${PYTHON}" -B -m vrtool.reset_arm --config "${ROOT}/config.toml" "$@"

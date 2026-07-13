@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+PYTHON="${VR_SYSTEM_PYTHON:-/usr/bin/python3}"
+if [[ ! -x ${PYTHON} ]]; then
+    printf 'ERROR: system Python not found: %s\n' "${PYTHON}" >&2
+    exit 2
+fi
+exec "${PYTHON}" -m vrtool.cli "$@"
