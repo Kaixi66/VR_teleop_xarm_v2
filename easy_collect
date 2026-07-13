@@ -213,7 +213,8 @@ if [[ ${stack_running} == false ]]; then
         exit "${prepare_status}"
     fi
 
-    printf '\n%s\n' 'Quest network is ready. Connect Quest to the shown Wi-Fi, but keep the VR teleoperation app CLOSED.'
+    printf '\n%s\n' 'Quest network is ready. Connect Quest to the shown Wi-Fi.'
+    printf '%s\n' 'First episode: keep the Quest App closed until COLLECTOR READY. After a previous episode/reset, an already-open App may remain open.'
 else
     printf '\n%s\n' 'The existing ROS/bridge session is healthy and will be reused.'
     printf '%s\n' 'Keep the Quest connected. The VR app may remain open between episodes.'

@@ -69,6 +69,7 @@ class EasyCollectTests(unittest.TestCase):
             self.assertTrue(any(value.startswith("--task=") for value in calls[4]))
             self.assertLess(result.stdout.index("Quest network is ready"), result.stdout.index("START"))
             self.assertIn("Quest Wi-Fi: LabQuestNet", result.stdout)
+            self.assertIn("an already-open App may remain open", result.stdout)
 
     def test_real_mode_reuses_a_healthy_active_stack(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
