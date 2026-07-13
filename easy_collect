@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
 # UF850 VR collection launcher.
-# Put machine/task-specific values in user_settings.env. That file is ignored
-# by Git so the hotspot password is never published.
+# Edit the USER SETTINGS block below before recording.
 
 set -uo pipefail
 
@@ -27,14 +26,7 @@ USE_HOTSPOT="true"
 HOTSPOT_PASSWORD=""
 
 # ====================== END USER SETTINGS ======================
-# Copy user_settings.env.example to user_settings.env, then edit that local
-# file instead of changing this public launcher.
 
-USER_SETTINGS_FILE="${VR_USER_SETTINGS_FILE:-${PROJECT_DIR}/user_settings.env}"
-if [[ -f ${USER_SETTINGS_FILE} ]]; then
-    # shellcheck source=/dev/null
-    source "${USER_SETTINGS_FILE}"
-fi
 if [[ -n ${VR_HOTSPOT_PASSWORD:-} ]]; then
     HOTSPOT_PASSWORD=${VR_HOTSPOT_PASSWORD}
 fi

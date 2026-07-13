@@ -14,9 +14,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class EasyCollectTests(unittest.TestCase):
-    def test_public_launcher_has_no_hardcoded_hotspot_password(self) -> None:
+    def test_public_launcher_uses_direct_settings_without_a_hardcoded_password(self) -> None:
         source = (PROJECT_ROOT / "easy_collect").read_text(encoding="utf-8")
-        self.assertIn("user_settings.env", source)
+        self.assertIn('# ======================== USER SETTINGS ========================', source)
+        self.assertIn('DATASET_NAME="example_task"', source)
+        self.assertIn('TASK_TEXT="Describe the task in one English sentence."', source)
+        self.assertNotIn("user_settings.env", source)
         self.assertIsNone(
             re.search(r'HOTSPOT_PASSWORD="[0-9]{8,}"', source),
             "public launcher must not contain a numeric hotspot password",

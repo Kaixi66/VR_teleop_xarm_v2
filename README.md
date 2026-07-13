@@ -9,15 +9,7 @@ Only two scripts are used:
 
 ## 1. Set the dataset name and prompt
 
-Open `user_settings.env` in the same folder as `easy_collect`.
-
-If the file does not exist, create it once:
-
-```bash
-cp user_settings.env.example user_settings.env
-```
-
-Fill in:
+Open `easy_collect` and edit the `USER SETTINGS` block at the top:
 
 ```bash
 DATASET_NAME="press_buttons"
