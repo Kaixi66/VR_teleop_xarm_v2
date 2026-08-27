@@ -11,11 +11,11 @@ PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Folder name created below vr_teleop_collection/data/.
 # Use ASCII letters, numbers, dots, underscores, or hyphens only.
-DATASET_NAME="put_blue_bowl_in_second_drawer"
+DATASET_NAME="hang_the_cup_dynamic"
 
 # One text field is used for task / instruction / prompt.
 # English is recommended for the training instruction.
-TASK_TEXT="put the blue bowl in the second drawer"
+TASK_TEXT="hang the yellow cup on the cup rack"
 
 # Use "real" for the robot and cameras, or "mock" for a safe test.
 MODE="real"

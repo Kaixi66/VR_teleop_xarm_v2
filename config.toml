@@ -1,8 +1,5 @@
-# Copy this file to config.toml and review every device-specific value before
-# connecting to hardware. config.toml is ignored by Git.
-
 [robot]
-ip = "192.168.1.230" # REPLACE with the UF850 controller IPv4 address.
+ip = "192.168.1.230"
 namespace = "/ufactory"
 report_type = "dev"
 add_gripper = true
@@ -12,12 +9,12 @@ bind_host = "0.0.0.0"
 listen_port = 5005
 feedback_port = 5006
 feedback_hz = 4.0
-quest_ip = "" # Empty means lock to the first valid Quest sender.
+quest_ip = ""
 quest_ready_timeout_s = 15.0
 
 [control]
 publish_hz = 50.0
-linear_speed_mm_s = 50.0 # Keep 50 for the first supervised hardware test.
+linear_speed_mm_s = 200.0
 angular_speed_rad_s = 0.3
 command_duration_s = 0.15
 deadband = 0.05
@@ -33,9 +30,9 @@ x_mm = [0.0, 600.0]
 y_mm = [0.0, 650.0]
 z_mm = [170.0, 650.0]
 
+# Standalone joint-space reset copied from the proven OFT/legacy collection
+# reset. Running ./reset_arm moves hardware and opens the gripper first.
 [reset]
-# DEVICE-SPECIFIC EXAMPLE. Verify the entire joint-space path on your UF850.
-# Never run reset_arm on a different setup without recalibrating this pose.
 joint_angles_deg = [55.399232, 7.733498, -48.980042, -1.039517, -57.38115, -0.614669]
 speed_deg_s = 30.0
 acceleration_deg_s2 = 100.0
@@ -66,12 +63,12 @@ startup_timeout_s = 8.0
 [[cameras]]
 name = "cam_0"
 role = "wrist"
-serial = "REPLACE_WITH_WRIST_REALSENSE_SERIAL"
+serial = "845112070404"
 
 [[cameras]]
 name = "cam_1"
 role = "external"
-serial = "REPLACE_WITH_EXTERNAL_REALSENSE_SERIAL"
+serial = "215222078407"
 
 [paths]
 ros_setup = "/opt/ros/jazzy/setup.bash"
@@ -84,5 +81,5 @@ logs_dir = "logs"
 
 [hotspot]
 ssid = "MyRobotHotspot"
-interface = "REPLACE_WITH_WIFI_INTERFACE"
+interface = "wlP1p1s0"
 password_env = "VR_HOTSPOT_PASSWORD"

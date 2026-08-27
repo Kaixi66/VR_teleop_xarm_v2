@@ -115,6 +115,23 @@ class CollectionLeaseTests(unittest.TestCase):
             self.assertIsNone(lease.collector_pid)
             self.assertEqual(lease.neutral_packets, 0)
 
+    def test_small_future_heartbeat_race_is_fresh_but_large_future_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "collection.lease.json"
+            lease = self.make_lease(path)
+
+            # The collector refreshed the file 10 ms after the bridge captured
+            # the tick timestamp. This is a normal cross-process scheduling race.
+            _write_collection_lease(path, pid=123, monotonic_s=10.01)
+            self.assertFalse(lease.observe(ZERO_COMMAND, 0.0, now=10.0))
+            self.assertTrue(lease.observe(ZERO_COMMAND, 0.0, now=10.0))
+
+            # A timestamp 100 ms ahead is not attributable to the normal race
+            # and must still pause control.
+            _write_collection_lease(path, pid=123, monotonic_s=10.10)
+            self.assertFalse(lease.enabled(now=10.0))
+            self.assertFalse(lease.armed)
+
     def test_new_collector_pid_requires_a_new_neutral_packet_count(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "collection.lease.json"

@@ -605,6 +605,13 @@ class CollectionLease:
     collector_pid: int | None = None
     neutral_packets: int = 0
 
+    # The bridge captures ``now`` near the start of a control tick, while the
+    # collector can atomically replace the lease file later in that same tick.
+    # The freshly written heartbeat can therefore appear a few milliseconds in
+    # the future.  Treat that bounded scheduling race as fresh, but continue to
+    # fail closed for timestamps far enough ahead to indicate corrupt data.
+    _future_tolerance_s: float = 0.05
+
     def _reset(self) -> None:
         self.armed = False
         self.collector_pid = None
@@ -620,7 +627,11 @@ class CollectionLease:
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             return None
         age_s = now - heartbeat_s
-        if collector_pid <= 0 or age_s < 0.0 or age_s > self.timeout_s:
+        if (
+            collector_pid <= 0
+            or age_s < -self._future_tolerance_s
+            or age_s > self.timeout_s
+        ):
             return None
         return collector_pid
 

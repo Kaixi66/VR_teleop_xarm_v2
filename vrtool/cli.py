@@ -12,6 +12,7 @@ from .doctor import run_doctor
 from .manager import (
     ManagerError,
     prepare_quest,
+    request_operator_stop,
     run_collector,
     stack_status,
     start_stack,
@@ -56,6 +57,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--hotspot", action="store_true")
     run.add_argument("--wait-quest", action="store_true", help="verify fresh Quest packets before recording")
 
+    commands.add_parser(
+        "stop-episode",
+        help="end the running episode and save it (what the launcher's stop key does)",
+    )
     commands.add_parser("status", help="show managed process status")
     commands.add_parser("stop", help="safely stop bridge and ROS processes")
 
@@ -115,6 +120,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             report = run_doctor(config)
             print(report.render())
             return 0 if report.ok else 1
+
+        if args.command == "stop-episode":
+            path = request_operator_stop(config)
+            print(f"Stop requested; the collector will finalize the episode ({path}).")
+            return 0
 
         if args.command == "prepare":
             prepare_quest(config, hotspot=args.hotspot)

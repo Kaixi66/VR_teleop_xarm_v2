@@ -32,6 +32,19 @@ def _collection_runtime_paths(config: Mapping[str, Any]) -> tuple[Path, Path, Pa
     )
 
 
+def operator_stop_path(config: Mapping[str, Any]) -> Path:
+    """File the launcher creates to end an episode without signalling anyone."""
+
+    return Path(str(config["paths"]["runtime_dir"])) / "collection.stop"
+
+
+def request_operator_stop(config: Mapping[str, Any]) -> Path:
+    path = operator_stop_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("stop requested by operator\n", encoding="utf-8")
+    return path
+
+
 def _pause_collection(config: Mapping[str, Any]) -> None:
     lease_path, armed_path, _abort_path = _collection_runtime_paths(config)
     lease_path.unlink(missing_ok=True)
@@ -157,6 +170,12 @@ def _ros_command(config: Mapping[str, Any], argv: Sequence[str]) -> list[str]:
         str(paths["workspace_setup"]),
         *argv,
     ]
+
+
+# An aborting collector still has to drain its save queue and write metadata.
+# A 50 Hz episode needs a couple of seconds for that alone, so the old 3 s grace
+# left no margin and SIGTERM regularly landed mid-finalize.
+_ABORT_FLUSH_GRACE_S = 20.0
 
 
 def _spawn(
@@ -520,7 +539,8 @@ def _start_stack_guarded(
     processes: list[subprocess.Popen[bytes]] = []
     entries: list[dict[str, Any]] = []
     lease_path, armed_path, abort_path = _collection_runtime_paths(config)
-    for stale_path in (lease_path, armed_path, abort_path):
+    stop_path = operator_stop_path(config)
+    for stale_path in (lease_path, armed_path, abort_path, stop_path):
         stale_path.unlink(missing_ok=True)
 
     try:
@@ -748,7 +768,8 @@ def _run_collector_guarded(
             raise ManagerError("The ROS/bridge stack is not healthy. Run './vrctl start' first.")
 
     lease_path, armed_path, abort_path = _collection_runtime_paths(config)
-    for stale_path in (lease_path, armed_path, abort_path):
+    stop_path = operator_stop_path(config)
+    for stale_path in (lease_path, armed_path, abort_path, stop_path):
         stale_path.unlink(missing_ok=True)
 
     command = [
@@ -774,12 +795,37 @@ def _run_collector_guarded(
                 str(abort_path),
                 "--teleop-armed-file",
                 str(armed_path),
+                "--operator-stop-file",
+                str(stop_path),
             ]
         )
 
     project_root = Path(str(config["_meta"]["project_root"]))
     process = subprocess.Popen(command, cwd=project_root, start_new_session=True)
     last_health_check = -1.0
+
+    def wait_ignoring_interrupts(timeout: float) -> int:
+        """Wait out the collector's flush even if the operator keeps hitting Ctrl+C.
+
+        A second interrupt used to propagate out of this wait, so the manager
+        returned while the collector was still finalizing.  ``easy_collect`` then
+        ran the arm reset, which stops the stack underneath the collector and left
+        the episode stranded as a hidden ``.inprogress`` directory.
+        """
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                return process.wait(timeout=remaining)
+            except KeyboardInterrupt:
+                print(
+                    "Still saving the episode; further interrupts are ignored. "
+                    "Please wait for the collector's SAVED or FAILED banner.",
+                    flush=True,
+                )
 
     def stop_collector_child() -> int:
         _pause_collection(config)
@@ -788,14 +834,14 @@ def _run_collector_guarded(
         except (ProcessLookupError, PermissionError):
             pass
         try:
-            return process.wait(timeout=30.0)
+            return wait_ignoring_interrupts(30.0)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
             try:
-                return process.wait(timeout=5.0)
+                return wait_ignoring_interrupts(5.0)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
@@ -825,14 +871,14 @@ def _run_collector_guarded(
                         encoding="utf-8",
                     )
                     try:
-                        process.wait(timeout=3.0)
+                        wait_ignoring_interrupts(_ABORT_FLUSH_GRACE_S)
                     except subprocess.TimeoutExpired:
                         try:
                             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
                         except (ProcessLookupError, PermissionError):
                             pass
                         try:
-                            process.wait(timeout=5.0)
+                            wait_ignoring_interrupts(5.0)
                         except subprocess.TimeoutExpired:
                             pass
                     return 1
@@ -844,6 +890,7 @@ def _run_collector_guarded(
     finally:
         _pause_collection(config)
         abort_path.unlink(missing_ok=True)
+        stop_path.unlink(missing_ok=True)
 
 
 def run_collector(

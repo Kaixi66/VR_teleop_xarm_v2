@@ -27,6 +27,5 @@ build/
 dist/
 *.egg-info/
 
-# Machine-specific files. Copy the tracked examples and edit locally.
-config.toml
+# Optional local override file.
 user_settings.env

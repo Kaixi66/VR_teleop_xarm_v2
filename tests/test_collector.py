@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import io
 import signal
+from contextlib import redirect_stderr
 import sys
 import tempfile
 import threading
@@ -73,15 +75,32 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(args.task, "open the drawer using the left handle")
 
     def test_collection_signals_use_python_controlled_interrupt_handler(self):
+        from vrtool.collector import _termination_signal_handler
+
         with patch("vrtool.collector.signal.signal") as install:
             install_collection_signal_handlers()
         expected = [
-            call(signal.SIGINT, signal.default_int_handler),
-            call(signal.SIGTERM, signal.default_int_handler),
+            call(signal.SIGINT, _termination_signal_handler),
+            call(signal.SIGTERM, _termination_signal_handler),
         ]
         if hasattr(signal, "SIGHUP"):
-            expected.append(call(signal.SIGHUP, signal.default_int_handler))
+            expected.append(call(signal.SIGHUP, _termination_signal_handler))
         self.assertEqual(install.call_args_list, expected)
+
+    def test_first_signal_interrupts_and_later_signals_are_refused(self):
+        from vrtool.collector import FINALIZING, _termination_signal_handler
+
+        install_collection_signal_handlers()
+        self.assertFalse(FINALIZING.is_set())
+        with self.assertRaises(KeyboardInterrupt):
+            _termination_signal_handler(signal.SIGINT, None)
+        self.assertTrue(FINALIZING.is_set())
+        # A second Ctrl+C during the flush must not abort the finalize.
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGINT):
+            with redirect_stderr(io.StringIO()) as captured:
+                _termination_signal_handler(signum, None)
+            self.assertIn("STILL BEING SAVED", captured.getvalue())
+        FINALIZING.clear()
 
     def test_from_project_mapping_and_relative_output(self):
         config = CollectorConfig.from_mapping(
@@ -250,6 +269,61 @@ class EpisodeTests(unittest.TestCase):
             (root / ".episode_004.inprogress").mkdir()
             (root / "not-an-episode").mkdir()
             self.assertEqual(next_episode_index(root), 5)
+
+    def test_operator_stop_file_ends_the_episode_and_still_completes_it(self):
+        try:
+            import cv2  # noqa: F401
+            import numpy  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("mock end-to-end test needs cv2 and numpy")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = CollectorConfig(
+                data_root=Path(temporary),
+                camera_serials=("mock-wrist", "mock-room"),
+                camera_roles=("wrist", "external"),
+                hz=50,
+                width=32,
+                height=24,
+                camera_fps=60,
+                frame_buffer_size=4,
+                max_camera_skew_ms=100,
+                max_frame_age_ms=500,
+                save_queue_size=16,
+                jpeg_quality=80,
+                min_free_gb=0,
+                startup_timeout_s=2,
+            )
+            stop_file = Path(temporary) / "collection.stop"
+            collector = TeleopCollector(
+                config,
+                "stop-key",
+                mock=True,
+                operator_stop_file=stop_file,
+            )
+            self.assertFalse(collector._operator_stop_requested())
+
+            def press_stop_key() -> None:
+                time.sleep(0.4)
+                stop_file.write_text("stop requested by operator\n", encoding="utf-8")
+
+            presser = threading.Thread(target=press_stop_key)
+            presser.start()
+            try:
+                result = collector.run()
+            finally:
+                presser.join()
+
+            # The stop key must finalize the episode, not abandon it: the
+            # directory is promoted out of .inprogress and metadata is written.
+            self.assertTrue(result.complete)
+            self.assertEqual(result.termination_reason, "operator_stop")
+            self.assertEqual(result.path.name, "episode_000")
+            self.assertFalse(result.path.with_name(".episode_000.inprogress").exists())
+            self.assertGreater(result.steps_written, 0)
+            metadata = json.loads((result.path / "episode_meta.json").read_text())
+            self.assertEqual(metadata["termination_reason"], "operator_stop")
+            self.assertTrue(metadata["complete"])
 
     def test_mock_episode_is_atomic_and_old_schema_readable(self):
         try:

@@ -21,7 +21,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(
             config["cameras"][1]["serial"], "REPLACE_WITH_EXTERNAL_REALSENSE_SERIAL"
         )
-        self.assertEqual(config["recording"]["hz"], 10.0)
+        self.assertEqual(config["recording"]["hz"], 50.0)
         self.assertEqual(config["network"]["quest_ready_timeout_s"], 15.0)
         self.assertEqual(
             config["paths"]["collector_python"],
@@ -45,7 +45,7 @@ class ConfigTests(unittest.TestCase):
                 "quest_ready_timeout_s = 0.0",
             ),
             "bad deadband": ("deadband = 0.05", "deadband = 1.0"),
-            "bad frame buffer": ("frame_buffer_size = 4", "frame_buffer_size = 1"),
+            "bad frame buffer": ("frame_buffer_size = 8", "frame_buffer_size = 1"),
             "unsupported format": ('pixel_format = "yuyv"', 'pixel_format = "rgb8"'),
             "empty path": ('collector_python = "~/robot_env/bin/python"', 'collector_python = ""'),
         }

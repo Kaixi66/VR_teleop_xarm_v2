@@ -17,6 +17,7 @@ import queue
 import re
 import signal
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -803,7 +804,12 @@ class AtomicEpisodeWriter:
             shutil.rmtree(temporary, ignore_errors=True)
             raise
 
-    def close(self, *, timeout_s: float | None = None) -> None:
+    def close(
+        self,
+        *,
+        timeout_s: float | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> None:
         if self._closed:
             return
         self._closed = True
@@ -831,7 +837,15 @@ class AtomicEpisodeWriter:
                 continue
 
         while self._thread.is_alive() and time.monotonic() < deadline:
+            if progress is not None:
+                progress(
+                    f"  * FLUSHING {self.steps_written} steps written, "
+                    f"{self._queue.unfinished_tasks} left, "
+                    f"{max(0.0, deadline - time.monotonic()):.0f}s before timeout"
+                )
             self._thread.join(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
+        if progress is not None:
+            progress("", force=True)
 
         if self._thread.is_alive():
             detail = "before the shutdown marker could be queued" if not sentinel_enqueued else "while draining pending steps"
@@ -883,6 +897,7 @@ class TeleopCollector:
         collection_lease_file: Path | None = None,
         control_abort_file: Path | None = None,
         teleop_armed_file: Path | None = None,
+        operator_stop_file: Path | None = None,
     ):
         self.config = config
         self.dataset = validate_dataset_name(dataset)
@@ -892,6 +907,7 @@ class TeleopCollector:
         self.collection_lease_file = collection_lease_file
         self.control_abort_file = control_abort_file
         self.teleop_armed_file = teleop_armed_file
+        self.operator_stop_file = operator_stop_file
         self.error_counts: Counter[str] = Counter()
         self.arm_source: ArmSource = arm_source or (
             MockArmSource() if mock else XArmStateSource(config.robot_ip)
@@ -936,6 +952,15 @@ class TeleopCollector:
         if self.collection_lease_file is not None:
             self.collection_lease_file.unlink(missing_ok=True)
 
+    def _operator_stop_requested(self) -> bool:
+        """True once the launcher has recorded the operator's stop keypress.
+
+        A file is used instead of a signal so ending an episode never has to
+        interrupt this process part-way through an image or metadata write.
+        """
+
+        return self.operator_stop_file is not None and self.operator_stop_file.exists()
+
     def _raise_if_control_aborted(self) -> None:
         if self.control_abort_file is None or not self.control_abort_file.exists():
             return
@@ -979,6 +1004,7 @@ class TeleopCollector:
         termination_reason = "stopped"
         terminal_error: BaseException | None = None
         writer_close_error: BaseException | None = None
+        status = StatusLine()
 
         try:
             writer = AtomicEpisodeWriter(
@@ -990,17 +1016,30 @@ class TeleopCollector:
                 source.start()
             self._wait_for_cameras()
             self._refresh_collection_lease()
-            print(
-                "COLLECTOR READY: robot connection and both cameras are ready. "
-                "Open/keep open the Quest app, hold the controllers still until TELEOP ARMED.",
-                flush=True,
+            banner(
+                [
+                    "COLLECTOR READY",
+                    "",
+                    "Robot connection and both cameras are up.",
+                    "Open/keep open the Quest app and hold both controllers still",
+                    "until the TELEOP ARMED banner appears.",
+                ],
+                char="-",
             )
             self._wait_for_teleop_armed()
             started_wall = datetime.now(timezone.utc)
             started_monotonic_ns = time.monotonic_ns()
-            print(
-                "TELEOP ARMED: Quest controls are live and recording has started.",
-                flush=True,
+            banner(
+                [
+                    ">>> TELEOP ARMED - RECORDING NOW <<<",
+                    "",
+                    f"dataset : {self.dataset}   episode: {writer.episode_name}",
+                    f"images  : {self.config.width}x{self.config.height} "
+                    f"@ {self.config.hz:g} Hz  (cameras {self.config.camera_fps} fps)",
+                    "",
+                    "Quest controls are live. Press R to end the episode and save it.",
+                ],
+                char="#",
             )
 
             interval_s = 1.0 / self.config.hz
@@ -1008,6 +1047,9 @@ class TeleopCollector:
             consecutive_failures = 0
             last_disk_check = 0.0
             while not self.stop_event.is_set():
+                if self._operator_stop_requested():
+                    termination_reason = "operator_stop"
+                    break
                 self._raise_if_control_aborted()
                 self._refresh_collection_lease()
                 for source in self.camera_sources:
@@ -1081,6 +1123,19 @@ class TeleopCollector:
                             termination_reason = "max_steps"
                             break
 
+                elapsed_s = (time.monotonic_ns() - started_monotonic_ns) / 1e9
+                status.update(
+                    "  * REC {step:6d} steps | {elapsed:6.1f}s | {rate:5.1f} Hz | "
+                    "queue {queue:2d}/{limit:d} | misses {misses:d}".format(
+                        step=writer.steps_written,
+                        elapsed=elapsed_s,
+                        rate=(samples_captured / elapsed_s) if elapsed_s > 0 else 0.0,
+                        queue=writer.queue_size,
+                        limit=self.config.save_queue_size,
+                        misses=sum(self.error_counts.values()),
+                    )
+                )
+
                 deadline += interval_s
                 wait_s = deadline - time.monotonic()
                 if wait_s <= -interval_s:
@@ -1088,6 +1143,7 @@ class TeleopCollector:
                     deadline = time.monotonic()
                     wait_s = 0.0
                 self.stop_event.wait(max(0.0, wait_s))
+            status.clear()
         except KeyboardInterrupt:
             termination_reason = "keyboard_interrupt"
             self.stop_event.set()
@@ -1096,6 +1152,22 @@ class TeleopCollector:
             termination_reason = _termination_reason(exc)
             self.stop_event.set()
         finally:
+            FINALIZING.set()
+            status.clear()
+            pending = writer.queue_size if writer is not None else 0
+            banner(
+                [
+                    "SAVING EPISODE - DO NOT PRESS Ctrl+C",
+                    "",
+                    f"reason  : {termination_reason}",
+                    f"steps   : {writer.steps_written if writer is not None else 0} written, "
+                    f"{pending} still queued",
+                    "",
+                    "Cameras and the robot link are closing, then the queued images",
+                    "are flushed to disk. This can take a few seconds.",
+                ],
+                char="*",
+            )
             # Pause VR motion before camera shutdown and writer flush.
             self._release_collection_lease()
             for source in reversed(self.camera_sources):
@@ -1109,7 +1181,10 @@ class TeleopCollector:
                 self._increment_error("robot_close_error")
             if writer is not None:
                 try:
-                    writer.close(timeout_s=self.config.writer_close_timeout_s)
+                    writer.close(
+                        timeout_s=self.config.writer_close_timeout_s,
+                        progress=status.update,
+                    )
                 except BaseException as exc:
                     writer_close_error = exc
                     self._increment_error("writer_close_error")
@@ -1140,9 +1215,16 @@ class TeleopCollector:
             terminal_error=terminal_error,
         )
         if writer_close_error is not None:
-            # The daemon writer may still be blocked inside the filesystem.  Do
-            # not race it by writing episode metadata into the same hidden tree.
+            # The daemon writer may still be blocked inside the filesystem, so the
+            # episode is never promoted out of the hidden tree here.  Metadata is
+            # still written: it lands on its own filename, cannot collide with the
+            # writer's step directories, and without it the retained directory is
+            # undiagnosable.
             path = writer.in_progress_path
+            try:
+                _atomic_json_write(path / "episode_meta.json", metadata)
+            except BaseException:
+                self._increment_error("metadata_write_error")
         else:
             try:
                 path = writer.finish(metadata, complete=complete)
@@ -1251,6 +1333,7 @@ def collect_episode(
     collection_lease_file: Path | None = None,
     control_abort_file: Path | None = None,
     teleop_armed_file: Path | None = None,
+    operator_stop_file: Path | None = None,
 ) -> CollectionResult:
     """Convenience API used by ``vrctl collect`` and ``vrctl run``."""
 
@@ -1264,6 +1347,7 @@ def collect_episode(
         collection_lease_file=collection_lease_file,
         control_abort_file=control_abort_file,
         teleop_armed_file=teleop_armed_file,
+        operator_stop_file=operator_stop_file,
     ).run(max_steps=max_steps)
 
 
@@ -1277,23 +1361,95 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--collection-lease-file", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--control-abort-file", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--teleop-armed-file", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--operator-stop-file", type=Path, default=None, help=argparse.SUPPRESS)
     return parser
+
+
+BANNER_WIDTH = 74
+
+
+def banner(lines: Sequence[str], char: str = "=", stream: Any = None) -> None:
+    """Print an unmissable block so the operator can read state across the room."""
+
+    stream = sys.stdout if stream is None else stream
+    print("", file=stream)
+    print(char * BANNER_WIDTH, file=stream)
+    for line in lines:
+        print(("  " + line).ljust(BANNER_WIDTH), file=stream)
+    print(char * BANNER_WIDTH, file=stream, flush=True)
+
+
+class StatusLine:
+    """One self-rewriting progress line on a TTY, periodic lines otherwise."""
+
+    def __init__(self, *, min_interval_s: float = 0.25):
+        self._tty = sys.stdout.isatty()
+        self._interval = min_interval_s if self._tty else 5.0
+        self._last = 0.0
+        self._width = 0
+        self._active = False
+
+    def update(self, text: str, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last < self._interval:
+            return
+        self._last = now
+        self._active = True
+        if self._tty:
+            padding = " " * max(0, self._width - len(text))
+            self._width = len(text)
+            print(f"\r{text}{padding}", end="", flush=True)
+        else:
+            print(text, flush=True)
+
+    def clear(self) -> None:
+        if self._active and self._tty:
+            print("\r" + " " * self._width + "\r", end="", flush=True)
+        self._active = False
+        self._width = 0
+
+
+# Set once the episode has started tearing down.  Any further termination signal
+# during the flush would abort the finalize and strand the episode as a hidden
+# ``.inprogress`` directory with no metadata, so those signals are refused.
+FINALIZING = threading.Event()
+
+
+def _termination_signal_handler(signum: int, frame: Any) -> None:
+    if FINALIZING.is_set():
+        banner(
+            [
+                f"SIGNAL {signum} IGNORED - THE EPISODE IS STILL BEING SAVED",
+                "",
+                "Do NOT press Ctrl+C again. Interrupting now would lose the episode.",
+                "Wait for the SAVED (or FAILED) banner below.",
+            ],
+            char="!",
+            stream=sys.stderr,
+        )
+        return
+    FINALIZING.set()
+    raise KeyboardInterrupt
 
 
 def install_collection_signal_handlers() -> None:
     """Make all normal termination signals follow the controlled finalize path.
 
     Non-interactive shells commonly start background jobs with ``SIGINT`` ignored,
-    and ignored dispositions survive ``exec``.  Explicitly restoring Python's
-    default interrupt handler here ensures the manager's SIGINT is never lost.
-    SIGTERM and SIGHUP deliberately use the same ``KeyboardInterrupt`` path so a
-    service stop or terminal disconnect also drains and finalizes the episode.
+    and ignored dispositions survive ``exec``.  Explicitly installing a handler
+    here ensures the manager's SIGINT is never lost.  SIGTERM and SIGHUP
+    deliberately use the same ``KeyboardInterrupt`` path so a service stop or
+    terminal disconnect also drains and finalizes the episode.
+
+    The first signal starts the controlled shutdown; later ones are refused so a
+    second Ctrl+C cannot interrupt the flush that is still writing the episode.
     """
 
-    signal.signal(signal.SIGINT, signal.default_int_handler)
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    FINALIZING.clear()
+    signal.signal(signal.SIGINT, _termination_signal_handler)
+    signal.signal(signal.SIGTERM, _termination_signal_handler)
     if hasattr(signal, "SIGHUP"):
-        signal.signal(signal.SIGHUP, signal.default_int_handler)
+        signal.signal(signal.SIGHUP, _termination_signal_handler)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1307,10 +1463,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         raw_config = load_config(args.config)
         config = CollectorConfig.from_mapping(raw_config)
-        print(
-            f"Recording dataset '{args.dataset}' at {config.hz:g} Hz. "
-            "Press Ctrl+C to finalize the episode.",
-            flush=True,
+        banner(
+            [
+                f"Recording dataset '{args.dataset}' at {config.hz:g} Hz.",
+                "Press R (in the launcher) to end the episode and save it.",
+            ],
+            char="-",
         )
         result = collect_episode(
             config,
@@ -1320,16 +1478,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_steps=args.max_steps,
             collection_lease_file=args.collection_lease_file,
             control_abort_file=args.control_abort_file,
+            operator_stop_file=args.operator_stop_file,
             teleop_armed_file=args.teleop_armed_file,
         )
     except (CollectionError, OSError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=__import__("sys").stderr)
+        lines = ["XXX  EPISODE FAILED - NOT SAVED  XXX", "", f"error: {exc}"]
         if isinstance(exc, CollectionError) and exc.result is not None:
-            print(f"Incomplete episode retained at: {exc.result.path}", file=__import__("sys").stderr)
+            lines += [
+                "",
+                f"steps written : {exc.result.steps_written}",
+                f"retained at   : {exc.result.path}",
+                "",
+                "The directory is still hidden (.inprogress) on purpose: the",
+                "episode is incomplete and must not be used for training.",
+            ]
+        banner(lines, char="X", stream=sys.stderr)
         return 1
-    print(
-        f"Saved {result.steps_written} steps to {result.path} "
-        f"({result.termination_reason})."
+    banner(
+        [
+            "EPISODE SAVED",
+            "",
+            f"steps  : {result.steps_written}",
+            f"path   : {result.path}",
+            f"reason : {result.termination_reason}",
+            "",
+            "It is now safe to move the robot / start the arm reset.",
+        ],
+        char="=",
     )
     return 0
 
