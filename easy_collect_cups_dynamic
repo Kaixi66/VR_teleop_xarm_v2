@@ -23,7 +23,7 @@ MODE="real"
 # Automatically create/activate the Quest Wi-Fi hotspot in real mode.
 # Leave HOTSPOT_PASSWORD empty to enter it without echo when needed.
 USE_HOTSPOT="true"
-HOTSPOT_PASSWORD="12345678"
+HOTSPOT_PASSWORD=""
 
 # ====================== END USER SETTINGS ======================
 
